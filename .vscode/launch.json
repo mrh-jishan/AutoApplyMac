@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AutoApplyMac}",
+            "name": "Debug AutoApplyMac",
+            "target": "AutoApplyMac",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug AutoApplyMac"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AutoApplyMac}",
+            "name": "Release AutoApplyMac",
+            "target": "AutoApplyMac",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release AutoApplyMac"
+        }
+    ]
+}

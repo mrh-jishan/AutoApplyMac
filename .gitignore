@@ -1,0 +1,33 @@
+# Xcode and Swift Package Manager
+.build/
+Packages/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+DerivedData/
+
+# macOS System Files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Editor & IDE files
+.vscode/*
+!.vscode/launch.json
+*.swp
+*~
+*.sublime-*
+
+# Local Application Data & Databases
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.log
+
+# Distribution & Compiled Bundles
+*.app
+*.dmg
+*.zip
