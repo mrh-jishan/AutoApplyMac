@@ -153,6 +153,11 @@ public struct BrowserContainerView: View {
                 .background(Color.blue.opacity(0.08))
             }
             
+            // Workday Enterprise Portal Assistant Banner
+            if coordinator.isWorkdayURL {
+                WorkdayAssistantBanner(coordinator: coordinator)
+            }
+            
             Divider()
             
             // Web View
@@ -188,6 +193,150 @@ public struct BrowserContainerView: View {
             if !newURL.isEmpty {
                 self.inputURL = newURL
             }
+        }
+    }
+}
+
+struct WorkdayAssistantBanner: View {
+    @ObservedObject var coordinator: WebKitCoordinator
+    @State private var isExecuting: Bool = false
+    
+    var body: some View {
+        HStack(spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color.orange.opacity(0.15))
+                    .frame(width: 28, height: 28)
+                Image(systemName: "briefcase.fill")
+                    .foregroundColor(.orange)
+                    .font(.system(size: 13, weight: .bold))
+            }
+            
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text("Workday Enterprise Portal")
+                        .font(.caption)
+                        .fontWeight(.bold)
+                        .foregroundColor(.primary)
+                    
+                    Text(stageBadge)
+                        .font(.system(size: 9, weight: .semibold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(stageBadgeColor.opacity(0.15))
+                        .foregroundColor(stageBadgeColor)
+                        .cornerRadius(4)
+                }
+                
+                Text(stageDescription)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+            
+            Spacer()
+            
+            HStack(spacing: 8) {
+                if coordinator.currentURL.contains("/apply/") {
+                    Button {
+                        Task {
+                            isExecuting = true
+                            _ = await coordinator.executeFormAutofill(candidate: ProfileService.shared.profile)
+                            isExecuting = false
+                        }
+                    } label: {
+                        Label(isExecuting ? "Autofilling..." : "Autofill Step", systemImage: "bolt.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
+                    .controlSize(.small)
+                    .disabled(isExecuting)
+                    
+                    Button {
+                        Task {
+                            _ = await coordinator.triggerResumeUpload()
+                        }
+                    } label: {
+                        Label("Attach Resume", systemImage: "doc.badge.plus")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    
+                    Button {
+                        Task {
+                            _ = await coordinator.workdayAdvanceStep()
+                        }
+                    } label: {
+                        Label("Next Step", systemImage: "arrow.right")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                } else if coordinator.currentURL.contains("/job/") || coordinator.currentURL.contains("myworkdayjobs.com") {
+                    Button {
+                        Task {
+                            isExecuting = true
+                            _ = await coordinator.workdayStartApply()
+                            isExecuting = false
+                        }
+                    } label: {
+                        Label("Start Workday Apply ⚡", systemImage: "play.circle.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
+                    .controlSize(.small)
+                    .disabled(isExecuting)
+                } else {
+                    Button {
+                        Task {
+                            isExecuting = true
+                            _ = await coordinator.executeFormAutofill(candidate: ProfileService.shared.profile)
+                            isExecuting = false
+                        }
+                    } label: {
+                        Label("Autofill Step", systemImage: "bolt.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
+                    .controlSize(.small)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color.orange.opacity(0.08))
+    }
+    
+    private var stageBadge: String {
+        if coordinator.currentURL.contains("/apply/") {
+            return "Application Wizard"
+        } else if coordinator.currentURL.contains("/login") {
+            return "Employer Sign In"
+        } else if coordinator.currentURL.contains("/job/") {
+            return "Job Details"
+        } else {
+            return "Workday"
+        }
+    }
+    
+    private var stageBadgeColor: Color {
+        if coordinator.currentURL.contains("/apply/") {
+            return .green
+        } else if coordinator.currentURL.contains("/login") {
+            return .blue
+        } else {
+            return .orange
+        }
+    }
+    
+    private var stageDescription: String {
+        if coordinator.currentURL.contains("/apply/") {
+            return "Wizard step active. Click 'Autofill Step' to populate fields, then 'Next Step ➔'."
+        } else if coordinator.currentURL.contains("/login") {
+            return "Workday accounts are per-employer. Sign in or create account to begin."
+        } else if coordinator.currentURL.contains("/job/") {
+            return "Click 'Start Workday Apply' to launch the application flow and attach resume."
+        } else {
+            return "Connected to Workday ATS."
         }
     }
 }

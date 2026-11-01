@@ -20,6 +20,10 @@ public final class WebKitCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
     public var activeResumePath: String? = nil
     public weak var webView: WKWebView?
     
+    public var isWorkdayURL: Bool {
+        return currentURL.contains("myworkdayjobs.com") || currentURL.contains("myworkday.com")
+    }
+    
     private override init() {
         super.init()
     }
@@ -457,6 +461,104 @@ public final class WebKitCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
         }
     }
     
+    // MARK: - Workday Automation Helpers
+    
+    public func workdayStartApply() async -> Bool {
+        guard let wv = webView else { return false }
+        let script = """
+        (() => {
+            // 1. If apply options modal is already open, click "Autofill with Resume"
+            const resumeBtn = document.querySelector('[data-automation-id="autofillWithResume"], [data-automation-id="applyWithResume"]');
+            if (resumeBtn) {
+                resumeBtn.click();
+                return { action: 'clicked_autofill_with_resume' };
+            }
+            
+            // 2. Otherwise click "Apply" button on job posting
+            const applyBtn = document.querySelector('[data-automation-id="adventureButton"], [data-automation-id="applyButton"], a[href*="/apply/"], button[aria-label*="Apply" i]');
+            if (applyBtn) {
+                applyBtn.click();
+                setTimeout(() => {
+                    const modalOption = document.querySelector('[data-automation-id="autofillWithResume"]');
+                    if (modalOption) modalOption.click();
+                }, 600);
+                return { action: 'clicked_apply_button' };
+            }
+            return { action: 'none_found' };
+        })()
+        """
+        do {
+            _ = try await wv.evaluateJavaScript(script)
+            statusMessage = "Workday: Starting application flow..."
+            return true
+        } catch {
+            statusMessage = "Workday error: \(error.localizedDescription)"
+            return false
+        }
+    }
+    
+    public func workdayAdvanceStep() async -> Bool {
+        guard let wv = webView else { return false }
+        let script = """
+        (() => {
+            const nextBtn = document.querySelector('[data-automation-id="bottom-navigation-next-button"], button[data-automation-id*="next" i], button[data-automation-id="page-footer-next"]');
+            if (nextBtn && !nextBtn.disabled) {
+                nextBtn.click();
+                return true;
+            }
+            const altNext = Array.from(document.querySelectorAll('button')).find(b => {
+                const t = b.innerText.trim().toLowerCase();
+                return t === 'next' || t === 'continue' || t === 'save and continue';
+            });
+            if (altNext && !altNext.disabled) {
+                altNext.click();
+                return true;
+            }
+            return false;
+        })()
+        """
+        do {
+            if let res = try await wv.evaluateJavaScript(script) as? Bool, res {
+                statusMessage = "Workday: Advanced to next step"
+                return true
+            } else {
+                statusMessage = "Workday: Next button not found or disabled"
+                return false
+            }
+        } catch {
+            statusMessage = "Workday navigation error: \(error.localizedDescription)"
+            return false
+        }
+    }
+    
+    public func triggerResumeUpload() async -> Bool {
+        guard let wv = webView else { return false }
+        let script = """
+        (() => {
+            const fileInput = document.querySelector('input[type="file"], input[data-automation-id*="upload" i]');
+            if (fileInput) {
+                fileInput.click();
+                return true;
+            }
+            const dropZone = document.querySelector('[data-automation-id="file-upload-drop-zone"], [data-automation-id*="file" i]');
+            if (dropZone) {
+                dropZone.click();
+                return true;
+            }
+            return false;
+        })()
+        """
+        do {
+            let res = try await wv.evaluateJavaScript(script) as? Bool ?? false
+            if res {
+                statusMessage = "Workday: Resume upload dialog triggered"
+            }
+            return res
+        } catch {
+            return false
+        }
+    }
+    
     // MARK: - Script Injection & Autofill
     
     public func executeFormAutofill(candidate: CandidateProfile) async -> [String: Any] {
@@ -466,9 +568,19 @@ public final class WebKitCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
         let email = escapeJS(candidate.email)
         let phone = escapeJS(candidate.phone)
         let address = escapeJS(candidate.address)
+        let city = escapeJS(candidate.city)
+        let state = escapeJS(candidate.state)
+        let postalCode = escapeJS(candidate.postalCode)
+        let country = escapeJS(candidate.country)
         let linkedin = escapeJS(candidate.linkedinURL)
         let github = escapeJS(candidate.githubURL)
         let portfolio = escapeJS(candidate.portfolioURL)
+        let isUSCitizen = candidate.isUSCitizen
+        let requiresSponsorship = candidate.requiresSponsorship
+        let eeocGender = escapeJS(candidate.eeocGender)
+        let eeocRace = escapeJS(candidate.eeocRace)
+        let eeocVeteran = escapeJS(candidate.eeocVeteran)
+        let eeocDisability = escapeJS(candidate.eeocDisability)
         
         let fillScript = """
         (() => {
@@ -490,9 +602,9 @@ public final class WebKitCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
                 return results;
             }
             
-            // Helper for native React / Angular setter
+            // Helper for native React / Angular setter to update Virtual DOM fibers
             const setNativeValue = (el, value) => {
-                if (!el || !value) return;
+                if (!el || value === undefined || value === null) return;
                 const proto = el instanceof HTMLInputElement ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype;
                 const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
                 if (descriptor && descriptor.set) {
@@ -505,99 +617,266 @@ public final class WebKitCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
                 el.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
             };
             
+            const fillInput = (selectors, val, label) => {
+                if (!val) return false;
+                for (const sel of selectors) {
+                    const el = document.querySelector(sel);
+                    if (el && !el.disabled) {
+                        setNativeValue(el, val);
+                        results.filled.push(label);
+                        return true;
+                    }
+                }
+                return false;
+            };
+            
             // 1. First & Last Name splitting
             const rawFullName = '\(fullName)'.trim();
             const nameParts = rawFullName.split(/\\s+/);
             const firstName = nameParts[0] || '';
             const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : nameParts[0] || '';
             
-            const firstInput = document.querySelector('#first_name, input[name*=\"first_name\" i], input[autocomplete=\"given-name\"], input[aria-label*=\"first name\" i]');
-            if (firstInput && firstName) {
-                setNativeValue(firstInput, firstName);
-                results.filled.push('First Name');
-            }
+            fillInput([
+                'input[data-automation-id="legalNameSection_firstName"]',
+                'input[data-automation-id*="firstName" i]',
+                '#first_name',
+                'input[name*="first_name" i]',
+                'input[name="firstName"]',
+                'input[autocomplete="given-name"]',
+                'input[aria-label*="first name" i]'
+            ], firstName, 'First Name');
             
-            const lastInput = document.querySelector('#last_name, input[name*=\"last_name\" i], input[autocomplete=\"family-name\"], input[aria-label*=\"last name\" i]');
-            if (lastInput && lastName) {
-                setNativeValue(lastInput, lastName);
-                results.filled.push('Last Name');
-            }
+            fillInput([
+                'input[data-automation-id="legalNameSection_lastName"]',
+                'input[data-automation-id*="lastName" i]',
+                '#last_name',
+                'input[name*="last_name" i]',
+                'input[name="lastName"]',
+                'input[autocomplete="family-name"]',
+                'input[aria-label*="last name" i]'
+            ], lastName, 'Last Name');
             
-            if (!firstInput && !lastInput && rawFullName) {
-                const fullInput = document.querySelector('input[name*=\"name\" i], #_systemfield_name, input[autocomplete=\"name\"], input[placeholder*=\"full name\" i]');
-                if (fullInput) {
-                    setNativeValue(fullInput, rawFullName);
-                    results.filled.push('Full Name');
-                }
+            // If separate first/last name didn't match, try full name input
+            if (!document.querySelector('input[data-automation-id="legalNameSection_firstName"]') && !document.querySelector('#first_name')) {
+                fillInput([
+                    'input[name*="name" i]',
+                    '#_systemfield_name',
+                    'input[autocomplete="name"]',
+                    'input[placeholder*="full name" i]'
+                ], rawFullName, 'Full Name');
             }
             
             // 2. Email Address
-            const emailInput = document.querySelector('#email, input[type=\"email\"], #_systemfield_email, input[autocomplete=\"email\"], input[name*=\"email\" i]');
-            if (emailInput && '\(email)') {
-                setNativeValue(emailInput, '\(email)');
-                results.filled.push('Email');
-            }
+            fillInput([
+                'input[data-automation-id="email"]',
+                'input[data-automation-id*="email" i]',
+                '#email',
+                'input[type="email"]',
+                '#_systemfield_email',
+                'input[autocomplete="email"]',
+                'input[name*="email" i]'
+            ], '\(email)', 'Email');
             
             // 3. Phone Number
-            const phoneInput = document.querySelector('#phone, input[type=\"tel\"], input[autocomplete=\"tel\"], input[name*=\"phone\" i], input[aria-label*=\"phone\" i]');
-            if (phoneInput && '\(phone)') {
-                setNativeValue(phoneInput, '\(phone)');
-                results.filled.push('Phone');
-            }
+            fillInput([
+                'input[data-automation-id="phone-number"]',
+                'input[data-automation-id*="phone" i]',
+                '#phone',
+                'input[type="tel"]',
+                'input[autocomplete="tel"]',
+                'input[name*="phone" i]',
+                'input[aria-label*="phone" i]'
+            ], '\(phone)', 'Phone');
             
-            // 4. Address & Location
-            const addressInput = document.querySelector('#job_application_location, input[name*=\"location\" i], input[name*=\"address\" i], input[autocomplete=\"address-line1\"], input[placeholder*=\"address\" i]');
-            if (addressInput && '\(address)') {
-                setNativeValue(addressInput, '\(address)');
-                results.filled.push('Location');
-            }
+            // 4. Address Components
+            let derivedAddress = '\(address)';
+            let derivedCity = '\(city)';
+            let derivedState = '\(state)';
+            let derivedZip = '\(postalCode)';
             
-            // 5. LinkedIn / GitHub / Website
-            const linkedinInput = document.querySelector('input[name*=\"linkedin\" i], input[placeholder*=\"linkedin\" i], input[id*=\"linkedin\" i], input[aria-label*=\"linkedin\" i]');
-            if (linkedinInput && '\(linkedin)') {
-                setNativeValue(linkedinInput, '\(linkedin)');
-                results.filled.push('LinkedIn');
-            }
-            
-            const githubInput = document.querySelector('input[name*=\"github\" i], input[placeholder*=\"github\" i], input[id*=\"github\" i]');
-            if (githubInput && '\(github)') {
-                setNativeValue(githubInput, '\(github)');
-                results.filled.push('GitHub');
-            }
-            
-            const websiteInput = document.querySelector('input[name*=\"website\" i], input[placeholder*=\"website\" i], input[name*=\"portfolio\" i]');
-            if (websiteInput && '\(portfolio)') {
-                setNativeValue(websiteInput, '\(portfolio)');
-                results.filled.push('Website');
-            }
-            
-            // 6. Work Authorization & Sponsorship Toggles (Buttons & Radios)
-            document.querySelectorAll('button').forEach(btn => {
-                const text = btn.innerText.trim().toLowerCase();
-                const parent = (btn.closest('div') ? btn.closest('div').innerText : '').toLowerCase();
-                if (parent.includes('authorized') && text === 'yes') {
-                    btn.click();
-                    results.filled.push('Auth:Yes');
+            if ((!derivedCity || !derivedState || !derivedZip) && derivedAddress.includes(',')) {
+                const parts = derivedAddress.split(',').map(s => s.trim());
+                if (parts.length >= 3) {
+                    if (!derivedCity) derivedCity = parts[1];
+                    const stateZip = parts[2].split(/\\s+/);
+                    if (!derivedState && stateZip.length > 0) derivedState = stateZip[0];
+                    if (!derivedZip && stateZip.length > 1) derivedZip = stateZip[1];
                 }
-                if (parent.includes('sponsorship') && text === 'no') {
-                    btn.click();
-                    results.filled.push('Sponsorship:No');
+            }
+            
+            fillInput([
+                'input[data-automation-id="addressSection_addressLine1"]',
+                'input[data-automation-id*="addressLine1" i]',
+                '#job_application_location',
+                'input[name*="location" i]',
+                'input[name*="address" i]',
+                'input[autocomplete="address-line1"]',
+                'input[placeholder*="address" i]'
+            ], derivedAddress, 'Address');
+            
+            fillInput([
+                'input[data-automation-id="addressSection_city"]',
+                'input[data-automation-id*="city" i]',
+                'input[autocomplete="address-level2"]',
+                'input[name*="city" i]',
+                '#city'
+            ], derivedCity, 'City');
+            
+            fillInput([
+                'input[data-automation-id="addressSection_postalCode"]',
+                'input[data-automation-id*="postalCode" i]',
+                'input[autocomplete="postal-code"]',
+                'input[name*="zip" i]',
+                'input[name*="postal" i]',
+                '#postal_code',
+                '#zip_code'
+            ], derivedZip, 'Postal Code');
+            
+            fillInput([
+                'input[data-automation-id="addressSection_countryRegion"]',
+                'input[autocomplete="address-level1"]',
+                'input[name*="state" i]',
+                '#state'
+            ], derivedState, 'State');
+            
+            // 5. Workday Dropdown Selectors
+            const phoneDeviceBtn = document.querySelector('button[data-automation-id="phone-device-type"]');
+            if (phoneDeviceBtn) {
+                phoneDeviceBtn.click();
+                setTimeout(() => {
+                    const mobileOpt = Array.from(document.querySelectorAll('[role="option"], [data-automation-id*="promptOption"]'))
+                        .find(el => el.innerText && el.innerText.toLowerCase().includes('mobile'));
+                    if (mobileOpt) mobileOpt.click();
+                }, 200);
+                results.filled.push('Phone Type: Mobile');
+            }
+            
+            const sourceBtn = document.querySelector('button[data-automation-id="sourceDropdown"]');
+            if (sourceBtn) {
+                sourceBtn.click();
+                setTimeout(() => {
+                    const opt = Array.from(document.querySelectorAll('[role="option"], [data-automation-id*="promptOption"]'))
+                        .find(el => el.innerText && (el.innerText.toLowerCase().includes('linkedin') || el.innerText.toLowerCase().includes('career site') || el.innerText.toLowerCase().includes('job board')));
+                    if (opt) opt.click();
+                }, 200);
+                results.filled.push('Source: Career Site/LinkedIn');
+            }
+            
+            const countryBtn = document.querySelector('button[data-automation-id="countryDropdown"]');
+            if (countryBtn && '\(country)') {
+                countryBtn.click();
+                setTimeout(() => {
+                    const opt = Array.from(document.querySelectorAll('[role="option"], [data-automation-id*="promptOption"]'))
+                        .find(el => el.innerText && el.innerText.toLowerCase().includes('\(country)'.toLowerCase()));
+                    if (opt) opt.click();
+                }, 200);
+                results.filled.push('Country: \(country)');
+            }
+            
+            // Prior Employee (select "No")
+            document.querySelectorAll('fieldset, [data-automation-id*="previousWorker" i], [data-automation-id*="priorEmployee" i]').forEach(fs => {
+                const radios = fs.querySelectorAll('input[type="radio"], [role="radio"]');
+                radios.forEach(r => {
+                    const label = (r.labels && r.labels[0] ? r.labels[0].innerText : r.parentElement ? r.parentElement.innerText : '').toLowerCase();
+                    if (label.includes('no')) {
+                        r.click();
+                        results.filled.push('Prior Employee: No');
+                    }
+                });
+            });
+            
+            // 6. LinkedIn / GitHub / Website
+            fillInput([
+                'input[data-automation-id*="linkedin" i]',
+                'input[name*="linkedin" i]',
+                'input[placeholder*="linkedin" i]',
+                'input[id*="linkedin" i]',
+                'input[aria-label*="linkedin" i]'
+            ], '\(linkedin)', 'LinkedIn');
+            
+            fillInput([
+                'input[data-automation-id*="github" i]',
+                'input[name*="github" i]',
+                'input[placeholder*="github" i]',
+                'input[id*="github" i]'
+            ], '\(github)', 'GitHub');
+            
+            fillInput([
+                'input[data-automation-id="website"]',
+                'input[data-automation-id*="website" i]',
+                'input[data-automation-id*="url" i]',
+                'input[name*="website" i]',
+                'input[placeholder*="website" i]',
+                'input[name*="portfolio" i]'
+            ], '\(portfolio)', 'Website');
+            
+            // 7. Work Authorization & Sponsorship Toggles (Buttons & Radios)
+            const authTarget = \(isUSCitizen) ? 'yes' : 'no';
+            const sponsorTarget = \(requiresSponsorship) ? 'yes' : 'no';
+            
+            document.querySelectorAll('fieldset, div[role="radiogroup"], .wd-form-group, div').forEach(group => {
+                const text = (group.innerText || '').toLowerCase();
+                if ((text.includes('authorized to work') || text.includes('work authorization') || text.includes('legal right to work')) && !text.includes('sponsorship')) {
+                    const radios = group.querySelectorAll('input[type="radio"], button, [role="radio"]');
+                    radios.forEach(btn => {
+                        const label = (btn.innerText || (btn.labels && btn.labels[0] ? btn.labels[0].innerText : btn.parentElement ? btn.parentElement.innerText : '')).trim().toLowerCase();
+                        if (label === authTarget || label.startsWith(authTarget + ' ') || label.startsWith(authTarget + ',')) {
+                            btn.click();
+                            results.filled.push('Work Auth: ' + authTarget);
+                        }
+                    });
+                }
+                if (text.includes('sponsorship') || text.includes('require visa') || text.includes('future require')) {
+                    const radios = group.querySelectorAll('input[type="radio"], button, [role="radio"]');
+                    radios.forEach(btn => {
+                        const label = (btn.innerText || (btn.labels && btn.labels[0] ? btn.labels[0].innerText : btn.parentElement ? btn.parentElement.innerText : '')).trim().toLowerCase();
+                        if (label === sponsorTarget || label.startsWith(sponsorTarget + ' ') || label.startsWith(sponsorTarget + ',')) {
+                            btn.click();
+                            results.filled.push('Sponsorship: ' + sponsorTarget);
+                        }
+                    });
                 }
             });
             
-            // 7. Equal Opportunity Demographic Radios
-            document.querySelectorAll('input[type=\"radio\"], input[type=\"checkbox\"]').forEach(inp => {
-                const label = (inp.labels && inp.labels[0] ? inp.labels[0].innerText : '').toLowerCase();
-                if (label.includes('male') || label.includes('asian') || label.includes('decline') || label.includes('i do not have a disability') || label.includes('not a protected veteran') || label.includes('agree') || label.includes('confirm')) {
-                    if (!inp.checked) {
-                        inp.click();
-                        results.filled.push('Option: ' + label);
+            // 8. Equal Opportunity Demographic Radios
+            const eeocTargets = [
+                '\(eeocGender)'.toLowerCase(),
+                '\(eeocRace)'.toLowerCase(),
+                '\(eeocVeteran)'.toLowerCase(),
+                '\(eeocDisability)'.toLowerCase(),
+                'decline', 'not a protected veteran', 'do not have a disability', 'i do not wish', 'male', 'female'
+            ].filter(t => t.length > 0 && !t.includes('decline to self-identify'));
+            
+            document.querySelectorAll('input[type="radio"], [role="radio"]').forEach(inp => {
+                const label = (inp.labels && inp.labels[0] ? inp.labels[0].innerText : inp.parentElement ? inp.parentElement.innerText : '').toLowerCase();
+                const matched = eeocTargets.some(target => label.includes(target)) || label.includes('decline') || label.includes('not a protected veteran') || label.includes('do not have a disability');
+                if (matched && !inp.checked) {
+                    inp.click();
+                    results.filled.push('EEOC: ' + label.slice(0, 20));
+                }
+            });
+            
+            // 9. Terms & Agreement Checkboxes
+            document.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+                const label = (cb.labels && cb.labels[0] ? cb.labels[0].innerText : cb.parentElement ? cb.parentElement.innerText : '').toLowerCase();
+                if (label.includes('agree') || label.includes('certify') || label.includes('consent') || label.includes('acknowledge') || label.includes('confirm')) {
+                    if (!cb.checked) {
+                        cb.click();
+                        results.filled.push('Terms Accepted');
                     }
                 }
             });
             
-            // 8. Auto-Trigger Resume File Dialog
-            const fileInput = document.querySelector('input[type=\"file\"], #resume, input[name*=\"resume\" i]');
+            // Signature text
+            fillInput([
+                'input[data-automation-id*="signature" i]',
+                'input[aria-label*="signature" i]',
+                'input[placeholder*="signature" i]',
+                '#signature'
+            ], rawFullName, 'Signature');
+            
+            // 10. Auto-Trigger Resume File Dialog
+            const fileInput = document.querySelector('input[type="file"], [data-automation-id="file-upload-drop-zone"], #resume, input[name*="resume" i]');
             if (fileInput) {
                 fileInput.click();
                 results.filled.push('Resume Triggered');
@@ -617,7 +896,7 @@ public final class WebKitCoordinator: NSObject, WKNavigationDelegate, WKUIDelega
             // Handle cross-origin iframe redirection automatically
             if let requiresRedirect = dict["requiresRedirect"] as? Bool, requiresRedirect,
                let directUrl = dict["directUrl"] as? String, !directUrl.isEmpty {
-                statusMessage = "Navigating to embedded Greenhouse application form..."
+                statusMessage = "Navigating to embedded application form..."
                 pendingAutofillAfterNavigation = true
                 load(url: directUrl)
                 return ["success": true, "redirected": directUrl]
