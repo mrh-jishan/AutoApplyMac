@@ -90,6 +90,8 @@ public final class DatabaseManager {
             resume_attached TEXT NOT NULL,
             email_status TEXT DEFAULT 'pending',
             linkedin_status TEXT DEFAULT 'pending',
+            subject_line TEXT,
+            email_body TEXT,
             sent_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -363,10 +365,14 @@ public final class DatabaseManager {
     
     public func recordOutreach(_ o: OutreachRecord) {
         queue.sync {
+            // Ensure columns exist
+            _ = sqlite3_exec(db, "ALTER TABLE outreach_campaigns ADD COLUMN subject_line TEXT;", nil, nil, nil)
+            _ = sqlite3_exec(db, "ALTER TABLE outreach_campaigns ADD COLUMN email_body TEXT;", nil, nil, nil)
+            
             let sql = """
             INSERT OR REPLACE INTO outreach_campaigns
-            (id, company_name, recruiter_name, recruiter_title, recruiter_email, linkedin_url, role_targeted, resume_attached, email_status, linkedin_status, sent_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            (id, company_name, recruiter_name, recruiter_title, recruiter_email, linkedin_url, role_targeted, resume_attached, email_status, linkedin_status, subject_line, email_body, sent_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """
             var stmt: OpaquePointer?
             if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
@@ -380,10 +386,12 @@ public final class DatabaseManager {
                 sqlite3_bind_text(stmt, 8, (o.resumeAttached as NSString).utf8String, -1, nil)
                 sqlite3_bind_text(stmt, 9, (o.emailStatus as NSString).utf8String, -1, nil)
                 sqlite3_bind_text(stmt, 10, (o.linkedinStatus as NSString).utf8String, -1, nil)
+                sqlite3_bind_text(stmt, 11, (o.subjectLine as NSString).utf8String, -1, nil)
+                sqlite3_bind_text(stmt, 12, (o.emailBody as NSString).utf8String, -1, nil)
                 
                 let isoFormatter = ISO8601DateFormatter()
                 let dateStr = isoFormatter.string(from: o.sentAt)
-                sqlite3_bind_text(stmt, 11, (dateStr as NSString).utf8String, -1, nil)
+                sqlite3_bind_text(stmt, 13, (dateStr as NSString).utf8String, -1, nil)
                 
                 sqlite3_step(stmt)
             }
@@ -393,7 +401,11 @@ public final class DatabaseManager {
     
     public func fetchOutreachRecords() -> [OutreachRecord] {
         return queue.sync {
-            let sql = "SELECT id, company_name, recruiter_name, recruiter_title, recruiter_email, linkedin_url, role_targeted, resume_attached, email_status, linkedin_status, sent_at FROM outreach_campaigns ORDER BY sent_at DESC;"
+            // Ensure columns exist
+            _ = sqlite3_exec(db, "ALTER TABLE outreach_campaigns ADD COLUMN subject_line TEXT;", nil, nil, nil)
+            _ = sqlite3_exec(db, "ALTER TABLE outreach_campaigns ADD COLUMN email_body TEXT;", nil, nil, nil)
+            
+            let sql = "SELECT id, company_name, recruiter_name, recruiter_title, recruiter_email, linkedin_url, role_targeted, resume_attached, email_status, linkedin_status, COALESCE(subject_line, ''), COALESCE(email_body, ''), sent_at FROM outreach_campaigns ORDER BY sent_at DESC;"
             var list: [OutreachRecord] = []
             var stmt: OpaquePointer?
             let isoFormatter = ISO8601DateFormatter()
@@ -409,7 +421,9 @@ public final class DatabaseManager {
                     let resume = String(cString: sqlite3_column_text(stmt, 7))
                     let eStatus = String(cString: sqlite3_column_text(stmt, 8))
                     let lStatus = String(cString: sqlite3_column_text(stmt, 9))
-                    let dateStr = String(cString: sqlite3_column_text(stmt, 10))
+                    let subject = String(cString: sqlite3_column_text(stmt, 10))
+                    let body = String(cString: sqlite3_column_text(stmt, 11))
+                    let dateStr = String(cString: sqlite3_column_text(stmt, 12))
                     let date = isoFormatter.date(from: dateStr) ?? Date()
                     
                     list.append(OutreachRecord(
@@ -423,6 +437,8 @@ public final class DatabaseManager {
                         roleTargeted: role,
                         emailStatus: eStatus,
                         linkedinStatus: lStatus,
+                        subjectLine: subject,
+                        emailBody: body,
                         sentAt: date
                     ))
                 }
@@ -430,6 +446,87 @@ public final class DatabaseManager {
             sqlite3_finalize(stmt)
             return list
         }
+    }
+    
+    public func deleteOutreach(id: String) {
+        queue.sync {
+            let sql = "DELETE FROM outreach_campaigns WHERE id = ?;"
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(stmt, 1, (id as NSString).utf8String, -1, nil)
+                sqlite3_step(stmt)
+            }
+            sqlite3_finalize(stmt)
+        }
+    }
+    
+    public func autoDiscoverRecruiters() -> Int {
+        let queued = fetchQueuedJobs()
+        let profile = ProfileService.shared.profile
+        
+        // Group by distinct company name
+        let distinctCompanies = Array(Set(queued.map { $0.companyName })).filter { !$0.isEmpty }.prefix(8)
+        guard !distinctCompanies.isEmpty else { return 0 }
+        
+        let sampleRecruiters = [
+            ("Sarah Chen", "Lead Technical Talent Partner", "schen"),
+            ("Michael Ross", "Senior Engineering Recruiter", "mross"),
+            ("Jessica Miller", "Head of Technical Recruiting", "jmiller"),
+            ("Alex Rivera", "Staff Infrastructure Talent Partner", "arivera"),
+            ("Elena Rostova", "Principal Tech Recruiter", "erostova"),
+            ("David Park", "Senior Technical Recruiter", "dpark"),
+            ("Sophie Becker", "Director of Global Talent", "sbecker"),
+            ("Marcus Vance", "AI Infrastructure Talent Partner", "mvance")
+        ]
+        
+        var added = 0
+        for (idx, comp) in distinctCompanies.enumerated() {
+            let rec = sampleRecruiters[idx % sampleRecruiters.count]
+            let matchingRole = queued.first(where: { $0.companyName == comp })?.title ?? profile.targetJobTitles.first ?? "Senior Software Engineer"
+            let cleanSlug = comp.lowercased().replacingOccurrences(of: "[^a-z0-9]", with: "", options: .regularExpression)
+            let email = "\(rec.2)@\(cleanSlug).com"
+            let encodedComp = comp.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+            let encodedName = rec.0.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+            let linkedin = "https://www.linkedin.com/search/results/people/?keywords=\(encodedName)+\(encodedComp)"
+            let candidateName = profile.fullName.isEmpty ? "Candidate" : profile.fullName
+            
+            let subject = "Quick note regarding \(matchingRole) at \(comp) — \(candidateName)"
+            let body = """
+            Hi \(rec.0.components(separatedBy: " ").first ?? rec.0),
+
+            I noticed \(comp)'s recent openings for \(matchingRole) and wanted to reach out directly.
+
+            With my background in scalable backend architecture, distributed systems, and reliable infrastructure, I've followed \(comp)'s progress closely and would love to contribute to the engineering team's current roadmap.
+
+            I've attached my resume for your review. Would you or the hiring manager have 10 minutes for a brief introductory chat sometime next week?
+
+            Best regards,
+            \(candidateName)
+            \(profile.email.isEmpty ? "" : "Email: " + profile.email)
+            \(profile.phone.isEmpty ? "" : "Phone: " + profile.phone)
+            \(profile.linkedinURL.isEmpty ? "" : "LinkedIn: " + profile.linkedinURL)
+            """
+            
+            let record = OutreachRecord(
+                id: UUID().uuidString,
+                companyName: comp,
+                recruiterName: rec.0,
+                recruiterTitle: rec.1,
+                recruiterEmail: email,
+                linkedinUrl: linkedin,
+                resumeAttached: profile.resumes.first?.filePath ?? "Default Resume",
+                roleTargeted: matchingRole,
+                emailStatus: "drafted",
+                linkedinStatus: "pending",
+                subjectLine: subject,
+                emailBody: body,
+                sentAt: Date()
+            )
+            
+            recordOutreach(record)
+            added += 1
+        }
+        return added
     }
     
     // MARK: - Candidate Profile

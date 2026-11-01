@@ -8,6 +8,8 @@ public struct MainSplitView: View {
     @State private var portalCounts: [PortalSource: Int] = [:]
     @State private var selectedJob: JobPosting?
     @State private var selectedApplication: ApplicationRecord?
+    @State private var selectedOutreach: OutreachRecord?
+    @State private var selectedProfileSection: ProfileWorkspaceSection = .personalInfo
     @State private var isCrawling: Bool = false
     @State private var showSettings: Bool = false
     @State private var showSetupWizard: Bool = !AppPaths.shared.hasCompletedSetup
@@ -57,11 +59,18 @@ public struct MainSplitView: View {
                         }
                     )
                 case .outreachCampaigns:
-                    OutreachListView(outreaches: outreaches)
+                    OutreachListView(
+                        outreaches: $outreaches,
+                        selectedOutreach: $selectedOutreach,
+                        onRefresh: reloadData
+                    )
                 case .candidateProfile:
-                    ProfileMiddleColumnView(onSwitchToBrowser: {
-                        navigationSection = .queuedJobs
-                    })
+                    ProfileMiddleColumnView(
+                        selectedSection: $selectedProfileSection,
+                        onSwitchToBrowser: {
+                            navigationSection = .queuedJobs
+                        }
+                    )
                 case .none:
                     Text("Select a section")
                 }
@@ -69,7 +78,12 @@ public struct MainSplitView: View {
             .navigationSplitViewColumnWidth(min: 270, ideal: 310, max: 390)
         } detail: {
             if navigationSection == .candidateProfile {
-                FullPageProfileAndSettingsView()
+                FullPageProfileAndSettingsView(selectedSection: $selectedProfileSection)
+            } else if navigationSection == .outreachCampaigns {
+                OutreachDetailWorkspaceView(
+                    selectedOutreach: $selectedOutreach,
+                    onRefresh: reloadData
+                )
             } else {
                 HStack(spacing: 0) {
                     // Foreground Interactive WebKit Browser
@@ -118,7 +132,7 @@ public struct MainSplitView: View {
                     }
                 }) {
                     Label(navigationSection == .candidateProfile ? "Job Browser" : "Profile & Settings",
-                          systemImage: navigationSection == .candidateProfile ? "safari" : "person.crop.circle.badge.gearshape")
+                          systemImage: navigationSection == .candidateProfile ? "safari" : "person.crop.circle.fill")
                 }
             }
         }
@@ -152,16 +166,16 @@ public struct MainSplitView: View {
     private func triggerLightpandaCrawl() {
         guard !isCrawling else { return }
         isCrawling = true
-        WebKitCoordinator.shared.statusMessage = "Searching LinkedIn, Workday, Lever, Greenhouse & Ashby..."
+        WebKitCoordinator.shared.statusMessage = "Searching Google Careers, LinkedIn, Workday, Lever, Greenhouse & Ashby..."
         
         Task {
             let res = await LightpandaService.shared.crawlAllPortals(db: db)
-            let total = res.ashby + res.greenhouse + res.linkedin + res.workday + res.lever
+            let total = res.google + res.ashby + res.greenhouse + res.linkedin + res.workday + res.lever
             
             await MainActor.run {
                 self.isCrawling = false
                 self.reloadData()
-                WebKitCoordinator.shared.statusMessage = "Crawl complete: +\(res.linkedin) LinkedIn, +\(res.workday) Workday, +\(res.lever) Lever, +\(res.greenhouse) Greenhouse, +\(res.ashby) Ashby (\(total) new)"
+                WebKitCoordinator.shared.statusMessage = "Crawl complete: +\(res.google) Google, +\(res.linkedin) LinkedIn, +\(res.workday) Workday, +\(res.lever) Lever, +\(res.greenhouse) Greenhouse, +\(res.ashby) Ashby (\(total) new)"
             }
         }
     }
@@ -174,6 +188,8 @@ public struct MainSplitView: View {
         Task {
             var added = 0
             switch portal {
+            case .googleJobs:
+                added = await LightpandaService.shared.crawlGoogleJobs(db: db)
             case .linkedin:
                 added = await LightpandaService.shared.crawlLinkedInJobs(db: db)
             case .workday:
@@ -181,11 +197,11 @@ public struct MainSplitView: View {
             case .lever:
                 added = await LightpandaService.shared.crawlLeverJobs(db: db)
             case .greenhouse:
-                for b in ["stripe", "airbnb", "figma", "notion", "databricks", "gusto", "pinterest", "robinhood"] {
+                for b in ["stripe", "airbnb", "figma", "notion", "databricks", "gusto", "pinterest", "robinhood", "anthropic", "affirm"] {
                     added += await LightpandaService.shared.crawlGreenhouseBoard(boardSlug: b, db: db)
                 }
             case .ashby:
-                for b in ["vantage", "incident", "warp", "postman", "sentry", "retool", "neon", "axiom"] {
+                for b in ["vantage", "incident", "warp", "postman", "sentry", "retool", "neon", "axiom", "ramp"] {
                     added += await LightpandaService.shared.crawlAshbyBoard(orgSlug: b, db: db)
                 }
             default:
@@ -207,12 +223,12 @@ public struct MainSplitView: View {
         
         let targetURL: String
         switch portal {
+        case .googleJobs:
+            targetURL = "https://www.google.com/about/careers/applications/jobs/results/?q=\(encoded)"
         case .linkedin:
             targetURL = "https://www.linkedin.com/jobs/search/?keywords=\(encoded)&f_WT=2"
         case .workday:
             targetURL = "https://www.google.com/search?q=site:myworkdayjobs.com+\(encoded)+remote"
-        case .googleJobs:
-            targetURL = "https://www.google.com/search?q=\(encoded)+remote+jobs&ibp=htl;jobs"
         case .greenhouse:
             targetURL = "https://www.google.com/search?q=site:job-boards.greenhouse.io+\(encoded)+remote"
         case .ashby:
@@ -462,42 +478,10 @@ struct ApplicationsListView: View {
     }
 }
 
-// MARK: - Outreach List View
-
-struct OutreachListView: View {
-    let outreaches: [OutreachRecord]
-    
-    var body: some View {
-        List(outreaches) { o in
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text(o.companyName)
-                        .font(.headline)
-                    Spacer()
-                    Text(o.emailStatus.capitalized)
-                        .font(.caption2)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.purple.opacity(0.2))
-                        .foregroundColor(.purple)
-                        .cornerRadius(4)
-                }
-                Text("\(o.recruiterName) — \(o.recruiterTitle)")
-                    .font(.subheadline)
-                    .foregroundColor(.primary)
-                Text("Role: \(o.roleTargeted)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            .padding(.vertical, 4)
-        }
-        .navigationTitle("Outreach (\(outreaches.count))")
-    }
-}
-
 // MARK: - Profile Middle Column View
 
 struct ProfileMiddleColumnView: View {
+    @Binding var selectedSection: ProfileWorkspaceSection
     let onSwitchToBrowser: () -> Void
     @ObservedObject var profileService = ProfileService.shared
     
@@ -517,45 +501,60 @@ struct ProfileMiddleColumnView: View {
             
             Divider()
             
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
                 Text("WORKSPACE SECTIONS")
                     .font(.caption2)
                     .fontWeight(.bold)
                     .foregroundColor(.secondary)
+                    .padding(.bottom, 2)
                 
-                HStack(spacing: 8) {
-                    Image(systemName: "person.text.rectangle")
-                        .foregroundColor(.blue)
-                    Text("Personal & Contact Details")
-                        .font(.caption)
-                }
-                
-                HStack(spacing: 8) {
-                    Image(systemName: "target")
-                        .foregroundColor(.purple)
-                    Text("Career Targets (\(p.targetJobTitles.count))")
-                        .font(.caption)
-                }
-                
-                HStack(spacing: 8) {
-                    Image(systemName: "doc.on.doc")
-                        .foregroundColor(.green)
-                    Text("Resumes Managed (\(p.resumes.count))")
-                        .font(.caption)
-                }
-                
-                HStack(spacing: 8) {
-                    Image(systemName: "sparkles")
-                        .foregroundColor(.orange)
-                    Text("AI Engine (\(p.aiProvider.capitalized))")
-                        .font(.caption)
-                }
-                
-                HStack(spacing: 8) {
-                    Image(systemName: "cylinder")
-                        .foregroundColor(.secondary)
-                    Text("Local SQLite Storage")
-                        .font(.caption)
+                ForEach(ProfileWorkspaceSection.allCases) { section in
+                    Button(action: {
+                        selectedSection = section
+                    }) {
+                        HStack(spacing: 10) {
+                            Image(systemName: section.icon)
+                                .font(.body)
+                                .foregroundColor(selectedSection == section ? .blue : .secondary)
+                                .frame(width: 22)
+                            
+                            Text(section.title)
+                                .font(.callout)
+                                .fontWeight(selectedSection == section ? .semibold : .regular)
+                                .foregroundColor(selectedSection == section ? .primary : .secondary)
+                            
+                            Spacer()
+                            
+                            if section == .resumes {
+                                Text("\(p.resumes.count)")
+                                    .font(.caption2)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.secondary.opacity(0.15))
+                                    .cornerRadius(6)
+                            } else if section == .careerTargets {
+                                Text("\(p.targetJobTitles.count)")
+                                    .font(.caption2)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.secondary.opacity(0.15))
+                                    .cornerRadius(6)
+                            } else if section == .aiEngine {
+                                Text(p.aiProvider.capitalized)
+                                    .font(.caption2)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.orange.opacity(0.15))
+                                    .foregroundColor(.orange)
+                                    .cornerRadius(6)
+                            }
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(selectedSection == section ? Color.accentColor.opacity(0.15) : Color.clear)
+                        .cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
             

@@ -4,14 +4,16 @@ import AppKit
 public struct FullPageProfileAndSettingsView: View {
     @ObservedObject private var profileService = ProfileService.shared
     @State private var profile: CandidateProfile = CandidateProfile()
-    @State private var selectedTab: Int = 0
+    @Binding public var selectedSection: ProfileWorkspaceSection
     @State private var detectedAgents: [String: String] = [:]
     @State private var aiTestStatus: String = ""
     @State private var isTestingAI: Bool = false
     @State private var isAnalyzingResume: Bool = false
     @State private var saveNotification: String = ""
     
-    public init() {}
+    public init(selectedSection: Binding<ProfileWorkspaceSection> = .constant(.personalInfo)) {
+        self._selectedSection = selectedSection
+    }
     
     public var body: some View {
         VStack(spacing: 0) {
@@ -20,15 +22,15 @@ public struct FullPageProfileAndSettingsView: View {
                 ZStack {
                     Circle()
                         .fill(LinearGradient(colors: [Color.blue, Color.cyan], startPoint: .topLeading, endPoint: .bottomTrailing))
-                        .frame(width: 52, height: 52)
+                        .frame(width: 48, height: 48)
                     Image(systemName: "person.fill")
-                        .font(.title2)
+                        .font(.title3)
                         .foregroundColor(.white)
                 }
                 
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 8) {
-                        Text(profile.fullName.isEmpty ? "New Candidate Profile" : profile.fullName)
+                        Text(profile.fullName.isEmpty ? "Candidate Profile & Settings" : profile.fullName)
                             .font(.title2)
                             .fontWeight(.bold)
                         
@@ -42,12 +44,25 @@ public struct FullPageProfileAndSettingsView: View {
                             .cornerRadius(6)
                     }
                     
-                    Text(profile.email.isEmpty ? "Configure your details and AI settings below" : "\(profile.email) • \(profile.phone.isEmpty ? "No phone" : profile.phone) • \(profile.address.isEmpty ? "Location not set" : profile.address)")
+                    Text(profile.email.isEmpty ? "Manage your contact info, career targets, resumes, and AI engines" : "\(profile.email) • \(profile.phone.isEmpty ? "No phone" : profile.phone)")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
                 
                 Spacer()
+                
+                // Active Section Tag
+                HStack(spacing: 6) {
+                    Image(systemName: selectedSection.icon)
+                        .foregroundColor(.blue)
+                    Text(selectedSection.title)
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.blue.opacity(0.12))
+                .cornerRadius(8)
                 
                 // Saved indicator
                 HStack(spacing: 6) {
@@ -58,46 +73,30 @@ public struct FullPageProfileAndSettingsView: View {
                         .foregroundColor(.secondary)
                 }
                 .padding(.horizontal, 10)
-                .padding(.vertical, 5)
+                .padding(.vertical, 6)
                 .background(Color(NSColor.controlBackgroundColor))
                 .cornerRadius(8)
             }
             .padding(.horizontal, 24)
-            .padding(.vertical, 16)
+            .padding(.vertical, 14)
             .background(Color(NSColor.windowBackgroundColor))
-            
-            Divider()
-            
-            // Segmented Tab Picker
-            Picker("", selection: $selectedTab) {
-                Text("Personal Info").tag(0)
-                Text("Career & Targets").tag(1)
-                Text("Resumes (\(profile.resumes.count))").tag(2)
-                Text("AI Engine").tag(3)
-                Text("Preferences & Storage").tag(4)
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 24)
-            .padding(.vertical, 12)
             
             Divider()
             
             // Scrollable Tab Content
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    switch selectedTab {
-                    case 0:
+                    switch selectedSection {
+                    case .personalInfo:
                         personalInfoSection
-                    case 1:
+                    case .careerTargets:
                         careerTargetsSection
-                    case 2:
+                    case .resumes:
                         resumesSection
-                    case 3:
+                    case .aiEngine:
                         aiEngineSection
-                    case 4:
+                    case .preferencesAndStorage:
                         preferencesAndStorageSection
-                    default:
-                        EmptyView()
                     }
                 }
                 .padding(28)

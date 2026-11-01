@@ -113,7 +113,7 @@ public struct SidebarView: View {
             
             Section(header: Text("Profile & Settings")) {
                 NavigationLink(value: NavigationSection.candidateProfile) {
-                    Label("Candidate Profile & Settings", systemImage: "person.crop.circle.badge.gearshape.fill")
+                    Label("Candidate Profile & Settings", systemImage: "person.crop.circle.fill")
                 }
             }
         }

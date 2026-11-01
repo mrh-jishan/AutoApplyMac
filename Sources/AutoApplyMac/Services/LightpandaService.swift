@@ -115,7 +115,10 @@ public final class LightpandaService: @unchecked Sendable {
     
     // MARK: - Multi-Portal Master Crawler
     
-    public func crawlAllPortals(db: DatabaseManager) async -> (ashby: Int, greenhouse: Int, linkedin: Int, workday: Int, lever: Int) {
+    public func crawlAllPortals(db: DatabaseManager) async -> (google: Int, ashby: Int, greenhouse: Int, linkedin: Int, workday: Int, lever: Int) {
+        // 0. Google Jobs / Google Careers
+        let googleCount = await crawlGoogleJobs(db: db)
+        
         // 1. Ashby Boards
         var ashbyCount = 0
         let ashbyTargets = ["vantage", "incident", "warp", "postman", "sentry", "retool", "neon", "axiom", "couchbase", "pagerduty"]
@@ -143,7 +146,98 @@ public final class LightpandaService: @unchecked Sendable {
         // 5. Lever Boards
         let leverCount = await crawlLeverJobs(db: db)
         
-        return (ashbyCount, greenhouseCount, linkedinCount, workdayCount, leverCount)
+        return (googleCount, ashbyCount, greenhouseCount, linkedinCount, workdayCount, leverCount)
+    }
+    
+    // MARK: - Google Jobs / Google Careers Crawler
+    
+    public func crawlGoogleJobs(query: String? = nil, db: DatabaseManager) async -> Int {
+        guard !db.isCompanySaturated("google") else { return 0 }
+        
+        let profile = ProfileService.shared.profile
+        let targetQueries: [String]
+        if let q = query, !q.isEmpty {
+            targetQueries = [q]
+        } else if !profile.targetJobTitles.isEmpty {
+            targetQueries = Array(profile.targetJobTitles.prefix(3))
+        } else {
+            let prof = profile.profession.isEmpty || profile.profession == "General" ? "Software Engineer" : profile.profession
+            targetQueries = [prof]
+        }
+        
+        var totalAdded = 0
+        
+        for q in targetQueries {
+            let encoded = q.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "engineer"
+            let urlString = "https://www.google.com/about/careers/applications/jobs/results/?q=\(encoded)"
+            guard let url = URL(string: urlString) else { continue }
+            
+            var req = URLRequest(url: url)
+            req.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+            req.timeoutInterval = 8.0
+            
+            guard let (data, resp) = try? await URLSession.shared.data(for: req),
+                  let http = resp as? HTTPURLResponse, http.statusCode == 200,
+                  let html = String(data: data, encoding: .utf8) else {
+                continue
+            }
+            
+            let pattern = "AF_initDataCallback\\(\\{key:\\s*'ds:1'.*?data:\\s*(\\[.*?\\])\\s*,\\s*sideChannel"
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]),
+                  let match = regex.firstMatch(in: html, options: [], range: NSRange(html.startIndex..<html.endIndex, in: html)),
+                  let range = Range(match.range(at: 1), in: html) else {
+                continue
+            }
+            
+            let jsonStr = String(html[range]).replacingOccurrences(of: "undefined", with: "null")
+            guard let jsonData = jsonStr.data(using: .utf8),
+                  let outer = try? JSONSerialization.jsonObject(with: jsonData) as? [Any],
+                  let jobs = outer.first as? [[Any]] else {
+                continue
+            }
+            
+            for j in jobs {
+                guard j.count > 1 else { continue }
+                let jid = "\(j[0])"
+                let title = "\(j[1])"
+                let company = j.count > 7 && "\(j[7])".count > 1 ? "\(j[7])" : "Google"
+                
+                guard matchesRoleFilter(title: title) else { continue }
+                
+                var location = "United States"
+                if j.count > 9, let locOuter = j[9] as? [[Any]], let firstLoc = locOuter.first, let locStr = firstLoc.first as? String {
+                    location = locStr
+                }
+                
+                let isRemote = location.lowercased().contains("remote") || location.lowercased().contains("us") || location.lowercased().contains("united states")
+                if profile.only100PercentRemote && !isRemote {
+                    continue
+                }
+                
+                let appURL = "https://www.google.com/about/careers/applications/jobs/results/\(jid)"
+                let desc = j.count > 10 ? "\(j[10])" : "Google Careers listing for \(title)"
+                
+                let posting = JobPosting(
+                    id: UUID().uuidString,
+                    portalSource: .googleJobs,
+                    externalJobId: jid,
+                    companyName: company,
+                    title: stripHTML(title),
+                    url: appURL,
+                    locationRaw: stripHTML(location),
+                    isRemote: isRemote,
+                    descriptionText: stripHTML(desc),
+                    status: .discovered
+                )
+                
+                if db.insertJobPosting(posting) {
+                    totalAdded += 1
+                }
+            }
+        }
+        
+        print("Scraped Google Jobs: queued \(totalAdded) roles")
+        return totalAdded
     }
     
     // MARK: - Lever Jobs Crawler

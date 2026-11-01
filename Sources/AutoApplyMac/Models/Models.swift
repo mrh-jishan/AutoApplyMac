@@ -217,6 +217,36 @@ public struct ApplicationRecord: Codable, Identifiable, Hashable {
     public var submittedAt: Date
 }
 
+public enum ProfileWorkspaceSection: String, CaseIterable, Identifiable {
+    case personalInfo = "personalInfo"
+    case careerTargets = "careerTargets"
+    case resumes = "resumes"
+    case aiEngine = "aiEngine"
+    case preferencesAndStorage = "preferencesAndStorage"
+    
+    public var id: String { rawValue }
+    
+    public var title: String {
+        switch self {
+        case .personalInfo: return "Personal Details"
+        case .careerTargets: return "Career Targets"
+        case .resumes: return "Resumes Managed"
+        case .aiEngine: return "AI Engine & Assistant"
+        case .preferencesAndStorage: return "Preferences & Storage"
+        }
+    }
+    
+    public var icon: String {
+        switch self {
+        case .personalInfo: return "person.text.rectangle"
+        case .careerTargets: return "target"
+        case .resumes: return "doc.on.doc"
+        case .aiEngine: return "sparkles"
+        case .preferencesAndStorage: return "gearshape.2"
+        }
+    }
+}
+
 public struct OutreachRecord: Codable, Identifiable, Hashable {
     public let id: String
     public var companyName: String
@@ -226,7 +256,39 @@ public struct OutreachRecord: Codable, Identifiable, Hashable {
     public var linkedinUrl: String
     public var resumeAttached: String
     public var roleTargeted: String
-    public var emailStatus: String // "sent", "drafted"
+    public var emailStatus: String // "sent", "drafted", "replied"
     public var linkedinStatus: String // "pending", "note_sent"
+    public var subjectLine: String
+    public var emailBody: String
     public var sentAt: Date
+    
+    public init(
+        id: String = UUID().uuidString,
+        companyName: String,
+        recruiterName: String,
+        recruiterTitle: String = "Technical Recruiter",
+        recruiterEmail: String = "",
+        linkedinUrl: String = "",
+        resumeAttached: String = "",
+        roleTargeted: String = "",
+        emailStatus: String = "drafted",
+        linkedinStatus: String = "pending",
+        subjectLine: String = "",
+        emailBody: String = "",
+        sentAt: Date = Date()
+    ) {
+        self.id = id
+        self.companyName = companyName
+        self.recruiterName = recruiterName
+        self.recruiterTitle = recruiterTitle
+        self.recruiterEmail = recruiterEmail
+        self.linkedinUrl = linkedinUrl
+        self.resumeAttached = resumeAttached
+        self.roleTargeted = roleTargeted
+        self.emailStatus = emailStatus
+        self.linkedinStatus = linkedinStatus
+        self.subjectLine = subjectLine
+        self.emailBody = emailBody
+        self.sentAt = sentAt
+    }
 }
